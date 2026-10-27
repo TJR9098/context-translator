@@ -1,0 +1,12 @@
+import { build } from 'esbuild';
+import { mkdir, copyFile, cp } from 'node:fs/promises';
+await mkdir('dist', { recursive: true });
+await build({ entryPoints: ['background', 'offscreen', 'engine', 'popup', 'options', 'reader'].map(n => `src/${n}.js`), outdir: 'dist', bundle: true, format: 'esm', target: 'chrome130', external: ['./vendor/*'] });
+await build({ entryPoints: ['src/content.js'], outfile: 'dist/content.js', bundle: true, format: 'iife', target: 'chrome116' });
+await copyFile('manifest.json', 'dist/manifest.json');
+await cp('public', 'dist', { recursive: true });
+await mkdir('dist/vendor', { recursive: true });
+for (const name of ['pdf.mjs', 'pdf.worker.mjs']) await copyFile(`node_modules/pdfjs-dist/build/${name}`, `dist/vendor/${name}`);
+for (const dir of ['cmaps', 'standard_fonts', 'wasm']) await cp(`node_modules/pdfjs-dist/${dir}`, `dist/vendor/${dir}`, { recursive: true });
+await copyFile('node_modules/pdfjs-dist/LICENSE', 'dist/vendor/PDFJS-LICENSE');
+console.log('插件已生成：dist/');

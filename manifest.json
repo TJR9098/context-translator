@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "全文伴读 · Context Translator",
+  "version": "0.1.1",
+  "description": "使用自己的大模型 API，结合全文上下文阅读网页和文字型 PDF。",
+  "minimum_chrome_version": "130",
+  "permissions": ["storage", "activeTab", "scripting", "offscreen"],
+  "host_permissions": ["https://*/*", "http://*/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "全文伴读" },
+  "options_page": "options.html",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self';"
+  }
+}

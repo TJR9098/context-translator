@@ -1,7 +1,19 @@
 import { extractPage } from './pdf-text.js';
 import { createClient, progressText } from './client.js';
+import { createAnnotations } from './annotations.js';
+import { assignBlockKeys, pdfDocumentKey } from './annotation-data.js';
 const ui = Object.fromEntries(['file', 'choose', 'url', 'url-form', 'load-url', 'start', 'stop', 'retry', 'toggle', 'status', 'pages', 'name'].map(id => [id, document.getElementById(id)]));
 let pdf, client, blocks = [], translations = new Map(), currentSource = '', currentTitle = '', hidden = false, loading = false;
+let annotations;
+const noteButton = document.createElement('button'); noteButton.textContent = '批注 / 导出'; noteButton.disabled = true;
+document.querySelector('.reader-toolbar .actions').append(noteButton);
+noteButton.onclick = () => annotations?.open();
+function annotationBlocks() {
+  return assignBlockKeys(blocks.map(block => {
+    const element = translations.get(block.id);
+    return { id: block.id, original: block.text, element, translation: element && !element.classList.contains('error') ? element.textContent : '' };
+  }));
+}
 const pdfjs = await import('./vendor/pdf.mjs');
 pdfjs.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('vendor/pdf.worker.mjs');
 function error(e) { ui.status.textContent = e.message || String(e); ui.status.classList.add('error'); }
@@ -14,6 +26,7 @@ function setLoading(value) {
 async function load(source, name, autostart = false) {
   if (loading) return;
   setLoading(true);
+  annotations?.dispose(); annotations = null; noteButton.disabled = true;
   ui.stop.disabled = true; ui.retry.disabled = true; ui.toggle.disabled = true;
   await client?.dispose(); client = null;
   await pdf?.loadingTask.destroy(); pdf = null;
@@ -28,6 +41,7 @@ async function load(source, name, autostart = false) {
     const task = pdfjs.getDocument({ ...(typeof source === 'string' ? { url: source } : { data }), cMapUrl: chrome.runtime.getURL('vendor/cmaps/'), cMapPacked: true, standardFontDataUrl: chrome.runtime.getURL('vendor/standard_fonts/'), wasmUrl: chrome.runtime.getURL('vendor/wasm/'), isEvalSupported: false, useSystemFonts: true });
     task.onPassword = (_update, reason) => { void task.destroy(); error(new Error('此 PDF 需要密码，请先解锁后再选择。')); };
     pdf = await task.promise;
+    const documentKey = await pdfDocumentKey(await pdf.getData());
     const metadata = await pdf.getMetadata().catch(() => null);
     currentTitle = metadata?.info?.Title?.trim() || name;
     ui.name.textContent = `${currentTitle} · ${pdf.numPages} 页`;
@@ -71,6 +85,14 @@ async function load(source, name, autostart = false) {
     if (!blocks.length) throw new Error('没有提取到可翻译的文字。扫描件或图片型 PDF 不在第一版支持范围内。');
     info(`已读取 ${pdf.numPages} 页、${blocks.length} 段。${noText ? `${noText} 页没有文字，请查看原版。` : ''}点击“翻译全文”开始。`);
     ui.toggle.disabled = false;
+    annotations = createAnnotations({
+      metadata: { key: documentKey, title: currentTitle, source: currentSource },
+      getBlocks: annotationBlocks,
+      restore: (block, text) => { block.element.textContent = text; block.element.hidden = false; }
+    });
+    const restored = await annotations.restore();
+    if (restored) info(`已读取 ${pdf.numPages} 页、${blocks.length} 段，恢复 ${restored} 条批注。可继续翻译全文。`);
+    noteButton.disabled = false;
   } catch (e) { error(e); blocks = []; }
   finally { setLoading(false); }
   if (autostart && blocks.length) await start().catch(error);
@@ -86,6 +108,7 @@ async function start() {
       target.hidden = hidden;
       target.classList.toggle('error', event.type === 'failure');
       target.textContent = event.type === 'failure' ? `未译：${event.error}` : event.text;
+      annotations?.highlight(target);
     }
   });
   info('正在启动全文翻译…');
@@ -118,7 +141,7 @@ const tab = await chrome.tabs.getCurrent();
 chrome.runtime.onMessage.addListener(msg => {
   if (msg?.target === 'reader-command' && msg.tabId === tab?.id) void start().catch(error);
 });
-window.addEventListener('pagehide', () => client?.dispose());
+window.addEventListener('pagehide', () => { client?.dispose(); annotations?.dispose(); });
 setLoading(false);
 info('选择一个 PDF 开始阅读。');
 const params = new URLSearchParams(location.search);

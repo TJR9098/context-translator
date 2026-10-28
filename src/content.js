@@ -2,10 +2,13 @@ import { extractBlocks, renderTranslation } from './extract.js';
 import { createClient, progressText } from './client.js';
 import { placeTranslation, TRANSLATION_CSS } from './placement.js';
 import { createToolbar } from './toolbar.js';
+import { createAnnotations } from './annotations.js';
+import { assignBlockKeys, webDocumentKey } from './annotation-data.js';
 if (!globalThis.__contextTranslator) {
   globalThis.__contextTranslator = true;
   let client, enabled = false, hidden = false, timer, locationKey = location.href, sequence = 0;
   let records = new Map(), identities = new WeakMap(), lastDocument = '';
+  let annotations, annotationUrl, hasSavedNotes = false;
   const { host, shadow, clamp } = createToolbar(document);
   const status = shadow.getElementById('status');
   const style = document.createElement('style');
@@ -17,6 +20,29 @@ if (!globalThis.__contextTranslator) {
     clamp();
   }
   function showError(error) { status.textContent = error.message || String(error); }
+  function annotationBlocks() {
+    return assignBlockKeys([...records.values()].map(record => ({
+      id: record.id,
+      original: record.text.replace(/⟦KEEP(\d+)⟧/g, (_, i) => record.protectedText[Number(i)]?.text || ''),
+      translation: record.translation && !record.translation.hasAttribute('data-error') ? record.translation.textContent : '',
+      element: record.translation
+    })));
+  }
+  function setupAnnotations() {
+    if (annotations && annotationUrl === location.href) return annotations;
+    annotations?.dispose();
+    annotationUrl = location.href;
+    annotations = createAnnotations({
+      metadata: { key: webDocumentKey(location.href), title: document.title, source: location.href },
+      getBlocks: annotationBlocks,
+      onChange: notes => { hasSavedNotes = notes.length > 0; },
+      restore: (block, text) => {
+        const record = records.get(block.id);
+        if (record) display(record, text, false, true);
+      }
+    });
+    return annotations;
+  }
   function scan() {
     const next = new Map();
     for (const block of extractBlocks(document)) {
@@ -34,7 +60,7 @@ if (!globalThis.__contextTranslator) {
     records = next;
     return { title: document.title, source: location.href, blocks: [...records.values()].map(({ id, text, section, protectedText }) => ({ id, text, section, protectedText })) };
   }
-  function display(record, text, failure = false) {
+  function display(record, text, failure = false, restored = false) {
     let target = record.translation;
     if (!target?.isConnected) {
       target = document.createElement('span');
@@ -45,7 +71,8 @@ if (!globalThis.__contextTranslator) {
     }
     target.hidden = hidden;
     target.toggleAttribute('data-error', failure);
-    target.replaceChildren(failure ? document.createTextNode(text) : renderTranslation(document, text, record.keeps));
+    target.replaceChildren(failure || restored ? document.createTextNode(text) : renderTranslation(document, text, record.keeps));
+    annotations?.highlight(target);
   }
   function newClient() {
     return createClient(event => {
@@ -64,6 +91,7 @@ if (!globalThis.__contextTranslator) {
     await client?.dispose();
     client = newClient();
     const doc = scan();
+    await setupAnnotations().ready;
     if (!doc.blocks.length) { status.textContent = '未找到可翻译正文。PDF 请使用插件的 PDF 阅读器。'; return; }
     status.textContent = `已识别 ${doc.blocks.length} 段，正在启动…`;
     await client.send('start', { document: doc });
@@ -72,6 +100,7 @@ if (!globalThis.__contextTranslator) {
     locationKey = location.href;
   }
   shadow.getElementById('start').onclick = () => start().catch(showError);
+  shadow.getElementById('annotations').onclick = () => { scan(); setupAnnotations().open(); };
   shadow.getElementById('stop').onclick = () => { enabled = false; client?.send('stop').catch(showError); };
   shadow.getElementById('retry').onclick = () => {
     if (!client) return;
@@ -83,24 +112,29 @@ if (!globalThis.__contextTranslator) {
     event.target.textContent = hidden ? '显示译文' : '隐藏译文';
   };
   async function refresh() {
-    if (!enabled) return;
+    if (!enabled && !hasSavedNotes) return;
     mount();
     if (location.href !== locationKey) {
       enabled = false;
       await client?.dispose();
       for (const record of records.values()) record.translation?.remove();
       records = new Map();
+      annotations?.dispose(); annotations = null; hasSavedNotes = false;
+      locationKey = location.href;
       status.textContent = '已切换页面，点击“翻译全文”开始新文章。';
+      await restoreSaved();
       return;
     }
     const doc = scan(), serialized = JSON.stringify(doc);
+    if (!enabled) { await annotations?.restore(); return; }
+    annotations?.highlight();
     if (serialized !== lastDocument) {
       lastDocument = serialized;
       await client.send('update', { document: doc });
     }
   }
   function schedule() {
-    if (!enabled) return;
+    if (!enabled && !hasSavedNotes) return;
     clearTimeout(timer);
     timer = setTimeout(() => refresh().catch(error => { enabled = false; showError(error); }), 800);
   }
@@ -117,5 +151,16 @@ if (!globalThis.__contextTranslator) {
     start().then(() => reply({ ok: true })).catch(error => { showError(error); reply({ ok: false, error: error.message }); });
     return true;
   });
-  window.addEventListener('pagehide', () => { enabled = false; client?.dispose(); });
+  async function restoreSaved() {
+    // Passive startup only restores user annotations; it never calls a model.
+    const instance = setupAnnotations();
+    const saved = await instance.ready;
+    if (!saved.length) return;
+    scan(); mount();
+    await instance.restore();
+    status.textContent = '已恢复本机批注。点击“翻译全文”可继续阅读整篇文章。';
+  }
+  void restoreSaved().catch(showError);
+  window.addEventListener('pagehide', () => { enabled = false; client?.dispose(); annotations?.dispose(); annotations = null; });
+  window.addEventListener('pageshow', event => { if (event.persisted) void restoreSaved().catch(showError); });
 }

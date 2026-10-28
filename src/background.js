@@ -1,4 +1,5 @@
 import { DEFAULTS, validateSettings, endpoint } from './config.js';
+import { annotationRequest } from './annotation-store.js';
 let creating;
 const trusted = sender => sender.url?.startsWith(chrome.runtime.getURL(''));
 chrome.runtime.onInstalled.addListener(() => {
@@ -47,6 +48,7 @@ async function launch(tab) {
   if (!response?.ok) throw new Error(response?.error || '页面翻译启动失败。');
 }
 async function handle(msg, sender) {
+  if (msg.target === 'annotations') return annotationRequest(msg, sender);
   if (msg.target === 'background-event' && trusted(sender)) {
     const { route, event } = msg;
     if (route.kind === 'content') {
@@ -88,7 +90,7 @@ async function handle(msg, sender) {
   return chrome.runtime.sendMessage({ ...msg, target: 'engine', route, settings });
 }
 chrome.runtime.onMessage.addListener((msg, sender, respond) => {
-  if (!['background', 'background-event'].includes(msg?.target)) return;
+  if (!['background', 'background-event', 'annotations'].includes(msg?.target)) return;
   handle(msg, sender).then(respond).catch(error => respond({ ok: false, error: error.message }));
   return true;
 });

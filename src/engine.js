@@ -1,4 +1,5 @@
-import { splitText, buildRequest, parseTranslation, complete, PROMPT_VERSION } from './translation.js';
+import { splitText, PROMPT_VERSION } from './translation.js';
+import { translateBatch } from './translation-batch.js';
 import { cacheGet, cachePut, cacheClear } from './cache.js';
 import { endpoint } from './config.js';
 const jobs = new Map();
@@ -60,7 +61,8 @@ async function run(job) {
           const text = record.parts[i];
           if (targets.length && (chars + text.length > maxChars || targets.length >= 12)) break;
           const id = `${record.id}:${i}`;
-          targets.push({ id, blockId: record.id, text, protectedText: record.protectedText });
+          const tokens = new Set(text.match(/⟦KEEP\d+⟧/g) || []);
+          targets.push({ id, blockId: record.id, text, protectedText: record.protectedText?.filter(p => tokens.has(p.token)) });
           owners.set(id, { record, part: i });
           chars += text.length;
         }
@@ -69,31 +71,29 @@ async function run(job) {
       progress(job);
       if (!targets.length) continue;
       try {
-        const request = buildRequest(job.document, targets, job.terms, job.settings);
-        job.mode = request.mode;
-        progress(job);
-        let parsed;
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            parsed = parseTranslation(await complete(job.settings, request.input, job.controller.signal), targets);
-            break;
-          } catch (error) {
-            if (job.controller.signal.aborted || error.fatal || attempt === 1) throw error;
+        const errors = await translateBatch({ document: job.document, targets, terms: job.terms, settings: job.settings,
+          signal: job.controller.signal,
+          onMode: mode => { job.mode = mode; progress(job); },
+          onTranslation: async (id, text, terms) => {
+            const { record, part } = owners.get(id);
+            if (!job.active || job.records.get(record.id) !== record) return;
+            mergeTerms(job, terms);
+            record.translated[part] = text;
+            if (record.parts.every((_, i) => record.translated[i] !== undefined)) await apply(job, record, record.translated.join('\n'), terms);
+            progress(job);
           }
-        }
-        if (!job.active) break;
-        mergeTerms(job, parsed.terms);
-        for (const [id, text] of parsed.translations) {
-          const { record, part } = owners.get(id);
-          if (job.records.get(record.id) !== record) continue;
-          record.translated[part] = text;
-          if (record.parts.every((_, i) => record.translated[i] !== undefined)) await apply(job, record, record.translated.join('\n'), parsed.terms);
+        });
+        for (const [id, error] of errors) {
+          const { record } = owners.get(id);
+          if (!job.active || job.records.get(record.id) !== record || record.status !== 'pending') continue;
+          record.status = 'failed';
+          emit(job, { type: 'failure', id: record.id, source: record.text, error: error.message });
         }
       } catch (error) {
         if (!job.active || job.controller.signal.aborted) break;
         const failed = error.fatal ? [...job.records.values()].filter(r => r.status === 'pending') : [...new Set([...owners.values()].map(o => o.record))];
         for (const record of failed) {
-          if (job.records.get(record.id) !== record) continue;
+          if (job.records.get(record.id) !== record || record.status !== 'pending') continue;
           record.status = 'failed';
           emit(job, { type: 'failure', id: record.id, source: record.text, error: error.message });
         }

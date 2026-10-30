@@ -2,9 +2,11 @@ import { extractPage } from './pdf-text.js';
 import { createClient, progressText } from './client.js';
 import { createAnnotations } from './annotations.js';
 import { assignBlockKeys, pdfDocumentKey } from './annotation-data.js';
+import { createSelectionTranslation } from './selection-translation.js';
 const ui = Object.fromEntries(['file', 'choose', 'url', 'url-form', 'load-url', 'start', 'stop', 'retry', 'toggle', 'status', 'pages', 'name'].map(id => [id, document.getElementById(id)]));
 let pdf, client, blocks = [], translations = new Map(), currentSource = '', currentTitle = '', hidden = false, loading = false;
 let annotations;
+const selectionTranslation = createSelectionTranslation({ root: () => ui.pages, metadata: () => ({ title: currentTitle, source: currentSource }) });
 const noteButton = document.createElement('button'); noteButton.textContent = '批注 / 导出'; noteButton.disabled = true;
 document.querySelector('.reader-toolbar .actions').append(noteButton);
 noteButton.onclick = () => annotations?.open();
@@ -26,6 +28,7 @@ function setLoading(value) {
 async function load(source, name, autostart = false) {
   if (loading) return;
   setLoading(true);
+  selectionTranslation.reset();
   annotations?.dispose(); annotations = null; noteButton.disabled = true;
   ui.stop.disabled = true; ui.retry.disabled = true; ui.toggle.disabled = true;
   await client?.dispose(); client = null;
@@ -141,7 +144,7 @@ const tab = await chrome.tabs.getCurrent();
 chrome.runtime.onMessage.addListener(msg => {
   if (msg?.target === 'reader-command' && msg.tabId === tab?.id) void start().catch(error);
 });
-window.addEventListener('pagehide', () => { client?.dispose(); annotations?.dispose(); });
+window.addEventListener('pagehide', () => { client?.dispose(); annotations?.dispose(); selectionTranslation.dispose(); });
 setLoading(false);
 info('选择一个 PDF 开始阅读。');
 const params = new URLSearchParams(location.search);

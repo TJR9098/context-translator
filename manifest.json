@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "全文伴读 · Context Translator",
-  "version": "0.2.1",
+  "version": "0.3.1",
   "description": "使用自己的大模型 API，结合全文上下文阅读网页和文字型 PDF。",
   "minimum_chrome_version": "130",
   "permissions": ["storage", "unlimitedStorage", "activeTab", "scripting", "offscreen"],

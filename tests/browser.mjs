@@ -69,6 +69,58 @@ try {
   await options.screenshot({ path: 'test-results/settings.png', fullPage: true });
   results.push('设置保存与 API 连接测试通过');
   const page = await context.newPage(); await page.goto(base);
+  async function selectText(page, selector, endSelector = selector) {
+    return page.evaluate(({ selector, endSelector }) => {
+      const start = document.querySelector(selector), end = document.querySelector(endSelector);
+      const range = document.createRange(); range.setStart(start.firstChild, 5); range.setEnd(end.lastChild, Math.min(15, end.lastChild.textContent.length));
+      const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+      return selection.toString().trim();
+    }, { selector, endSelector });
+  }
+  const selected = await selectText(page, '#first', '#first + p');
+  await page.getByRole('button', { name: '翻译选中内容', exact: true }).waitFor();
+  assert.equal(apiCalls, 0, '仅划选不应调用模型');
+  await page.getByRole('button', { name: '翻译选中内容', exact: true }).click();
+  const selectionPanel = page.getByRole('dialog', { name: '划词翻译', exact: true });
+  await selectionPanel.getByText('翻译完成 · 仅处理所选文字', { exact: true }).waitFor();
+  assert.equal(requests[0].targets.length, 1);
+  assert.equal(requests[0].targets[0].text, selected);
+  assert.equal(requests[0].context.length, 1);
+  assert.equal(requests[0].context[0].text, selected, '未选中的正文不得发送');
+  assert.equal(await selectionPanel.locator('#result').textContent(), `译文：${selected}`);
+  assert.equal(await page.locator('[data-ct-owned="translation"]').count(), 0);
+  await page.getByRole('button', { name: '关闭划词翻译', exact: true }).click();
+  results.push('跨段落/行内代码划词翻译：仅发送选区、不启动全文、浮窗显示通过');
+  mode = 'missing';
+  await selectText(page, 'h2');
+  await page.getByRole('button', { name: '翻译选中内容', exact: true }).click();
+  await selectionPanel.getByText('翻译失败，可重试。', { exact: true }).waitFor();
+  mode = 'ok';
+  await page.getByRole('button', { name: '重试选区翻译', exact: true }).click();
+  await selectionPanel.getByText('翻译完成 · 仅处理所选文字', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '关闭划词翻译', exact: true }).click();
+  results.push('划词翻译失败提示和重试恢复通过');
+  delay = 500;
+  await selectText(page, 'h1');
+  const beforeCancelSelection = apiCalls;
+  await page.getByRole('button', { name: '翻译选中内容', exact: true }).click();
+  await new Promise((resolve, reject) => {
+    const timer = setInterval(() => { if (apiCalls > beforeCancelSelection) { clearInterval(timer); resolve(); } }, 20);
+    setTimeout(() => { clearInterval(timer); reject(new Error('选区请求未启动')); }, 10000).unref();
+  });
+  await page.getByRole('button', { name: '停止翻译', exact: true }).click();
+  await selectionPanel.getByText('已停止', { exact: true }).waitFor();
+  await page.waitForTimeout(600);
+  assert.equal(await selectionPanel.locator('#result').textContent(), '', '停止后不得显示迟到结果');
+  await page.setViewportSize({ width: 390, height: 700 });
+  const panelBounds = await selectionPanel.boundingBox();
+  assert.ok(panelBounds.x >= 0 && panelBounds.x + panelBounds.width <= 390);
+  await page.screenshot({ path: 'test-results/selection-mobile.png' });
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.getByRole('button', { name: '关闭划词翻译', exact: true }).click();
+  delay = 10;
+  results.push('划词翻译停止后无迟到结果、390px 窄屏浮窗通过');
+  requests.length = 0;
   const inject = async () => options.evaluate(async url => {
     const tabs = await chrome.tabs.query({}); const tab = tabs.find(t => t.url === url);
     await chrome.tabs.update(tab.id, { active: true });
@@ -81,6 +133,27 @@ try {
   assert.equal(requests[0].context.length, 7);
   assert.ok(!requests[0].context.some(b => b.text.includes('Do not translate')));
   results.push('整页双语展示、完整上下文、代码保留与内容排除通过');
+  const callsBeforeAnchor = apiCalls;
+  await page.evaluate(() => {
+    window.translationNodes = [...document.querySelectorAll('[data-ct-owned="translation"]')];
+    document.querySelector('h2').id = 'evaluation';
+    const link = document.createElement('a'); link.href = '#evaluation'; link.textContent = 'Jump to evaluation';
+    document.querySelector('nav').append(link);
+  });
+  await page.getByRole('link', { name: 'Jump to evaluation' }).click();
+  await page.evaluate(() => document.body.classList.toggle('toc-active'));
+  await page.waitForTimeout(1200);
+  assert.ok(page.url().endsWith('#evaluation'));
+  assert.ok(await page.evaluate(() => window.translationNodes.every(n => n.isConnected)), '目录跳转必须保留原译文节点');
+  await page.goBack();
+  await page.evaluate(() => document.body.classList.toggle('toc-active'));
+  await page.waitForTimeout(1200);
+  await page.goForward();
+  await page.evaluate(() => document.body.classList.toggle('toc-active'));
+  await page.waitForTimeout(1200);
+  assert.ok(await page.evaluate(() => window.translationNodes.every(n => n.isConnected)));
+  assert.equal(apiCalls, callsBeforeAnchor, '锚点跳转和前进后退不得新增翻译请求');
+  results.push('目录锚点跳转、前进后退保留译文，无新增 API 请求');
   await page.evaluate(() => { const p = document.createElement('p'); p.id = 'dynamic'; p.textContent = 'A newly loaded paragraph must be translated automatically.'; document.querySelector('article').append(p); });
   await page.waitForFunction(() => document.getElementById('dynamic').nextElementSibling?.dataset.ctOwned === 'translation');
   await page.evaluate(() => document.getElementById('dynamic').textContent = 'An updated paragraph needs a fresh translation.');
@@ -114,12 +187,27 @@ try {
   await page.waitForFunction(() => document.getElementById('cancel').nextElementSibling?.textContent.startsWith('译文'));
   await page.screenshot({ path: 'test-results/web-bilingual.png', fullPage: true });
   results.push('停止请求、恢复未完成段落通过');
+  const callsBeforeNewPage = apiCalls;
+  await page.evaluate(() => { history.pushState({}, '', '/another-article?version=2'); document.body.classList.toggle('new-article'); });
+  await page.waitForFunction(() => document.querySelectorAll('[data-ct-owned="translation"]').length === 0);
+  assert.equal(await page.locator('[data-ct-owned="translation"]').count(), 0);
+  assert.equal(apiCalls, callsBeforeNewPage);
+  results.push('真实文章路径改变仍清理旧译文，不自动启动新文章翻译');
   const reader = await context.newPage();
   await reader.goto(`chrome-extension://${id}/reader.html`);
   await reader.waitForFunction(() => !document.getElementById('choose').disabled);
   await reader.locator('#file').setInputFiles(resolve('test-results/fixture.pdf'));
   await reader.waitForFunction(() => !document.getElementById('start').disabled);
   assert.ok(await reader.locator('.original').count() >= 2);
+  const beforeSelection = requests.length;
+  const pdfSelection = await selectText(reader, '.original');
+  await reader.getByRole('button', { name: '翻译选中内容', exact: true }).click();
+  await reader.getByRole('dialog', { name: '划词翻译', exact: true }).getByText('翻译完成 · 仅处理所选文字', { exact: true }).waitFor();
+  assert.equal(requests[beforeSelection].targets[0].text, pdfSelection);
+  assert.equal(requests[beforeSelection].context.length, 1);
+  assert.equal(await reader.locator('.translation:visible').count(), 0);
+  await reader.getByRole('button', { name: '关闭划词翻译', exact: true }).click();
+  results.push('本地 PDF 未翻译全文即可划词翻译，通过独立浮窗展示');
   await reader.getByRole('button', { name: '翻译全文', exact: true }).click();
   await reader.waitForFunction(() => document.getElementById('status').textContent.includes('翻译完成'));
   assert.ok(await reader.locator('.translation:visible').count() >= 2);
@@ -157,8 +245,8 @@ try {
     await reader.screenshot({ path: 'test-results/real-paper.png', fullPage: false });
     results.push(`实际论文 ${pages} 页、${paragraphs} 个文本段提取与模拟全文翻译通过`);
   }
-  if (process.env.LIVE_SITES === '1') {
-    const urls = [
+  if (process.env.LIVE_SITES === '1' || process.env.LIVE_TOC === '1') {
+    const urls = process.env.LIVE_TOC === '1' ? ['https://claude.dev/blog/solving-code-review-at-anthropic/#1-the-work-is-verified-before-anyone-else-looks'] : [
       'https://claude.dev/blog/automating-eval-design-and-hillclimbing/',
       'https://huggingface.co/blog/ibm-research/altk-evolve-bc',
       'https://commandline.microsoft.com/agentic-software-engineering-large-scale-code-migration-language-modernization-spec-driven-development/'
@@ -182,6 +270,18 @@ try {
       await live.waitForFunction(() => document.querySelector('[data-ct-owned="toolbar"]')?.shadowRoot.getElementById('status').textContent.includes('翻译完成'), null, { timeout: 90000 });
       const count = await live.locator('[data-ct-owned="translation"]').count();
       assert.ok(count > 5);
+      if (process.env.LIVE_TOC === '1') {
+        const calls = apiCalls;
+        const before = await live.locator('[data-ct-owned="translation"]').allTextContents();
+        await live.locator('a[href="#rethinking-the-purpose-of-code-review"]').first().click();
+        await live.waitForTimeout(1800);
+        // Also exercise the observer even if this site's TOC implementation changes.
+        await live.evaluate(() => document.body.classList.toggle('ct-test-toc'));
+        await live.waitForTimeout(1200);
+        assert.deepEqual(await live.locator('[data-ct-owned="translation"]').allTextContents(), before);
+        assert.equal(apiCalls, calls);
+        results.push(`claude.dev 实际目录点击后 ${count} 段译文保留且不重新请求模型`);
+      }
       await live.screenshot({ path: `test-results/live-${index + 1}.png` });
       results.push(`${new URL(url).hostname} 实际页面抽取与模拟双语展示通过：${count} 段`);
       await live.close();

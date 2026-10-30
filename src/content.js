@@ -4,9 +4,17 @@ import { placeTranslation, TRANSLATION_CSS } from './placement.js';
 import { createToolbar } from './toolbar.js';
 import { createAnnotations } from './annotations.js';
 import { assignBlockKeys, webDocumentKey } from './annotation-data.js';
+import { createSelectionTranslation } from './selection-translation.js';
 if (!globalThis.__contextTranslator) {
   globalThis.__contextTranslator = true;
-  let client, enabled = false, hidden = false, timer, locationKey = location.href, sequence = 0;
+  // TOC links change the fragment, not the document or its translation job.
+  function pageUrl() {
+    const url = new URL(location.href);
+    url.hash = '';
+    return url.href;
+  }
+  let selectionTranslation = createSelectionTranslation();
+  let client, enabled = false, hidden = false, timer, locationKey = pageUrl(), sequence = 0;
   let records = new Map(), identities = new WeakMap(), lastDocument = '';
   let annotations, annotationUrl, hasSavedNotes = false;
   const { host, shadow, clamp } = createToolbar(document);
@@ -29,11 +37,11 @@ if (!globalThis.__contextTranslator) {
     })));
   }
   function setupAnnotations() {
-    if (annotations && annotationUrl === location.href) return annotations;
+    if (annotations && annotationUrl === pageUrl()) return annotations;
     annotations?.dispose();
-    annotationUrl = location.href;
+    annotationUrl = pageUrl();
     annotations = createAnnotations({
-      metadata: { key: webDocumentKey(location.href), title: document.title, source: location.href },
+      metadata: { key: webDocumentKey(annotationUrl), title: document.title, source: annotationUrl },
       getBlocks: annotationBlocks,
       onChange: notes => { hasSavedNotes = notes.length > 0; },
       restore: (block, text) => {
@@ -58,7 +66,7 @@ if (!globalThis.__contextTranslator) {
     }
     for (const [id, old] of records) if (!next.has(id)) old.translation?.remove();
     records = next;
-    return { title: document.title, source: location.href, blocks: [...records.values()].map(({ id, text, section, protectedText }) => ({ id, text, section, protectedText })) };
+    return { title: document.title, source: pageUrl(), blocks: [...records.values()].map(({ id, text, section, protectedText }) => ({ id, text, section, protectedText })) };
   }
   function display(record, text, failure = false, restored = false) {
     let target = record.translation;
@@ -97,7 +105,7 @@ if (!globalThis.__contextTranslator) {
     await client.send('start', { document: doc });
     enabled = true;
     lastDocument = JSON.stringify(doc);
-    locationKey = location.href;
+    locationKey = pageUrl();
   }
   shadow.getElementById('start').onclick = () => start().catch(showError);
   shadow.getElementById('annotations').onclick = () => { scan(); setupAnnotations().open(); };
@@ -114,13 +122,14 @@ if (!globalThis.__contextTranslator) {
   async function refresh() {
     if (!enabled && !hasSavedNotes) return;
     mount();
-    if (location.href !== locationKey) {
+    if (pageUrl() !== locationKey) {
+      selectionTranslation.reset();
       enabled = false;
       await client?.dispose();
       for (const record of records.values()) record.translation?.remove();
       records = new Map();
       annotations?.dispose(); annotations = null; hasSavedNotes = false;
-      locationKey = location.href;
+      locationKey = pageUrl();
       status.textContent = '已切换页面，点击“翻译全文”开始新文章。';
       await restoreSaved();
       return;
@@ -161,6 +170,6 @@ if (!globalThis.__contextTranslator) {
     status.textContent = '已恢复本机批注。点击“翻译全文”可继续阅读整篇文章。';
   }
   void restoreSaved().catch(showError);
-  window.addEventListener('pagehide', () => { enabled = false; client?.dispose(); annotations?.dispose(); annotations = null; });
-  window.addEventListener('pageshow', event => { if (event.persisted) void restoreSaved().catch(showError); });
+  window.addEventListener('pagehide', () => { enabled = false; client?.dispose(); annotations?.dispose(); annotations = null; selectionTranslation.dispose(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { selectionTranslation = createSelectionTranslation(); void restoreSaved().catch(showError); } });
 }
